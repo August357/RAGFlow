@@ -16,7 +16,7 @@ LLM_QA_System/
 ├── backend/          # FastAPI 后端
 ├── core/             # RAG 核心（向量库、LLM、问答链）
 ├── frontend/         # Vue3 前端
-├── data/docs/        # 示例文档
+├── data/docs/        # 本地文档目录（不上传，见 data/docs/README.md）
 ├── models/           # 本地模型（需自行下载，见 models/README.md）
 ├── vector_db/        # 向量库（运行后生成）
 ├── download_models.py

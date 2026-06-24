@@ -18,6 +18,11 @@ vector_db/*
 *.sqlite
 data/uploads/
 
+# 知识库文档（不上传，仅保留目录说明）
+data/docs/*
+!data/docs/.gitkeep
+!data/docs/README.md
+
 # 环境变量与密钥
 .env
 .env.*
