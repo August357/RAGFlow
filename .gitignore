@@ -1,0 +1,64 @@
+# Python 虚拟环境
+rag_env/
+venv/
+env/
+ENV/
+.venv/
+
+# 模型权重（体积大，不上传）
+models/**
+!models/README.md
+
+# 向量库（运行产物，需本地重建）
+vector_db/*
+!vector_db/.gitkeep
+
+# 数据库与运行时数据
+*.db
+*.sqlite
+data/uploads/
+
+# 环境变量与密钥
+.env
+.env.*
+*.pem
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Node.js
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.npm/
+
+# HuggingFace / 下载缓存
+.cache/
+**/.cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日志与导出
+*.log
+RAG对话记录*.pdf
+*.pdf
+
+# 临时文件
+*.tmp
+*.bak

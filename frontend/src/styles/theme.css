@@ -1,0 +1,64 @@
+:root {
+
+--bg-color:#F5E6C8;
+
+--card-color:#FFF8E1;
+
+--primary:#FFB74D;
+
+--success:#81C784;
+
+--danger:#E57373;
+
+--border:#4E342E;
+
+--text:#3E2723;
+
+--sidebar-bg:#8D6E63;
+
+--sidebar-text:#FFF8E1;
+
+--chat-bg:#F5E6C8;
+
+--bubble-bg:#FFF8E1;
+
+}
+
+/* 夜间模式 */
+.dark {
+
+--bg-color:#2B2118;
+
+--card-color:#3D2F24;
+
+--primary:#FFB74D;
+
+--success:#81C784;
+
+--danger:#E57373;
+
+--border:#8D6E63;
+
+--text:#FFF8E1;
+
+--sidebar-bg:#1A1410;
+
+--sidebar-text:#FFF8E1;
+
+--chat-bg:#1A1410;
+
+--bubble-bg:#3D2F24;
+
+}
+
+body {
+
+margin:0;
+
+background:var(--bg-color);
+
+color:var(--text);
+
+transition:background 0.3s,color 0.3s;
+
+}
