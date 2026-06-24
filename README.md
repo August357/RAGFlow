@@ -1,4 +1,4 @@
-# LLM_QA_System
+# RAGFlow
 
 基于 RAG 的智能问答系统，支持 PDF/Word 文档检索与 ChatGLM3-6B 本地问答。
 
@@ -70,5 +70,5 @@ npm run dev
 
 ## 说明
 
-- **模型文件**、**向量库**、**node_modules** 已加入 `.gitignore`，不会上传到 GitHub
-- 克隆仓库后需按上述步骤下载模型并重建向量库
+- **模型文件**、**知识库文档**、**向量库**、**node_modules** 已加入 `.gitignore`，不会上传到 GitHub
+- 克隆仓库后需按上述步骤下载模型、放入文档并重建向量库
