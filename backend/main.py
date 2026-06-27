@@ -25,13 +25,35 @@ from core.vector_store import (
 
 app = FastAPI()
 
+_llm_ready = False
+_llm_load_error = ""
+
 
 @app.on_event("startup")
 def preload_llm():
-    """先加载 LLM，再懒加载 Embedding，避免 Windows 上 4-bit 量化崩溃"""
+    """启动时预加载 LLM；失败时不终止整个服务，便于前端仍能访问其他接口"""
+    global _llm_ready, _llm_load_error
     print("正在预加载 ChatGLM3-6B 模型...")
-    load_model()
-    print("ChatGLM3-6B 预加载完成")
+    try:
+        load_model()
+        _llm_ready = True
+        _llm_load_error = ""
+        print("ChatGLM3-6B 预加载完成")
+    except Exception as e:
+        _llm_ready = False
+        _llm_load_error = str(e)
+        print(f"ChatGLM3-6B 预加载失败（服务仍运行）: {e}")
+        print("问答接口将返回错误提示，请检查 models/chatglm3-6b 与 GPU 显存")
+
+
+@app.get("/api/health")
+def health():
+    """健康检查：前端/代理报错时可先访问此接口确认后端是否存活"""
+    return {
+        "status": "ok",
+        "llm_ready": _llm_ready,
+        "llm_error": _llm_load_error or None,
+    }
 
 
 app.add_middleware(
@@ -369,5 +391,5 @@ if __name__ == "__main__":
         "backend.main:app",
         host="127.0.0.1",
         port=8000,
-        reload=True
+        reload=False,
     )
