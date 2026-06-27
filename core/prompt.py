@@ -81,15 +81,13 @@ class PromptBuilder:
         context = "\n".join(context_parts)
         
         # 构建完整Prompt
-        prompt = f"""你是一个知识库问答助手。
-
-请严格依据提供的上下文回答问题。
+        prompt = f"""你是一个知识库问答助手，只能依据下方「上下文」作答。
 
 要求：
-1. 不允许编造内容
-2. 上下文没有答案时明确说明
-3. 优先引用原文
-4. 保持简洁准确
+1. 只能使用上下文中明确出现的信息，禁止编造、推测或套用其他实验/文档的内容
+2. 若上下文无法回答问题（例如问实验四但上下文只有实验二/实验五），必须回答：
+   「知识库中未找到与该问题相关的资料，无法作答。」
+3. 回答简洁，并尽量引用原文关键句
 
 上下文：
 {context}
@@ -157,7 +155,7 @@ class PromptBuilder:
 # ============================================
 
 # 创建默认的PromptBuilder实例
-prompt_builder = PromptBuilder(max_context_length=3000)
+prompt_builder = PromptBuilder(max_context_length=1500)
 
 
 # ============================================
