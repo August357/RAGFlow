@@ -1,8 +1,10 @@
+import gc
 import os
 import sys
 import threading
 
 os.environ["HF_HUB_DISABLE_SYMLINKS"] = "true"
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 try:
     from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
@@ -15,6 +17,11 @@ except ImportError as e:
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 LOCAL_MODEL_PATH = os.path.join(BASE_DIR, "models", "chatglm3-6b")
+
+# 8GB 显存安全上限：避免 chat(max_length=8192) 导致 OOM 进程崩溃
+MAX_INPUT_CHARS = 2500
+MAX_NEW_TOKENS = 512
+MAX_TOTAL_TOKENS = 2048
 
 _model = None
 _tokenizer = None
@@ -39,6 +46,10 @@ def load_model():
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            try:
+                torch.cuda.set_per_process_memory_fraction(0.92)
+            except Exception:
+                pass
 
         print("正在加载Tokenizer...")
         try:
@@ -74,10 +85,45 @@ def load_model():
     return _model, _tokenizer
 
 
+def chat_model(query: str, max_new_tokens: int = MAX_NEW_TOKENS) -> str:
+    """
+    线程安全、限长推理，防止 max_length=8192 撑爆 8GB 显存导致进程被系统杀死。
+    """
+    text = (query or "").strip()
+    if not text:
+        return "请输入有效问题。"
+
+    if len(text) > MAX_INPUT_CHARS:
+        text = text[:MAX_INPUT_CHARS] + "\n...(输入过长已截断)"
+
+    with _lock:
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        model, tokenizer = load_model()
+
+        inputs = tokenizer.build_chat_input(text, history=[], role="user")
+        input_len = int(inputs["input_ids"].shape[1])
+        max_length = min(input_len + max_new_tokens, MAX_TOTAL_TOKENS)
+        if max_length <= input_len:
+            max_length = min(input_len + 128, MAX_TOTAL_TOKENS)
+
+        print(f"LLM 推理: input_tokens≈{input_len}, max_length={max_length}")
+
+        response, _ = model.chat(
+            tokenizer,
+            text,
+            history=[],
+            max_length=max_length,
+            do_sample=False,
+        )
+        return response
+
+
 def test_model():
-    model, tokenizer = load_model()
-    response, history = model.chat(tokenizer, "你好", history=[])
-    print("\n回答:", response)
+    answer = chat_model("你好")
+    print("\n回答:", answer)
 
 
 if __name__ == "__main__":
