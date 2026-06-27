@@ -6,11 +6,12 @@ RAG问答链核心模块
 import os
 import gc
 import json
+import re
 import torch
 
 from langchain_community.vectorstores import FAISS
 
-from core.llm import load_model
+from core.llm import chat_model
 from core.prompt import prompt_builder
 from core.vector_store import get_embedding_model, VECTOR_DB_PATH
 
@@ -33,7 +34,7 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "true"
 _reranker = None
 
 def load_reranker():
-    """懒加载BGE-Reranker模型"""
+    """懒加载BGE-Reranker模型（CPU 运行，避免与 ChatGLM 争用 GPU 显存）"""
     global _reranker
     if _reranker is not None:
         return _reranker
@@ -55,10 +56,11 @@ def load_reranker():
         
         _reranker = FlagReranker(
             model_path,
-            use_fp16=torch.cuda.is_available(),
-            device="cuda" if torch.cuda.is_available() else "cpu"
+            use_fp16=False,
+            devices="cpu",
+            batch_size=16,
         )
-        print("BGE-Reranker加载成功！")
+        print("BGE-Reranker加载成功！（CPU）")
         return _reranker
     except ImportError:
         print("FlagEmbedding未安装，跳过Reranker")
@@ -66,6 +68,22 @@ def load_reranker():
     except Exception as e:
         print(f"加载Reranker失败: {e}")
         return None
+
+
+def _reset_reranker():
+    """释放 Reranker 实例，避免异常后单例处于不可用状态"""
+    global _reranker
+    if _reranker is None:
+        return
+    try:
+        if hasattr(_reranker, "model"):
+            del _reranker.model
+        if hasattr(_reranker, "tokenizer"):
+            del _reranker.tokenizer
+    except Exception:
+        pass
+    _reranker = None
+    gc.collect()
 
 # ============================================
 # 动态加载向量库
@@ -124,10 +142,112 @@ def retrieve(query: str, top_k: int = None) -> list:
 # ============================================
 
 # BGE-Reranker 分数低于此阈值视为与知识库无关（cross-encoder logits）
-RERANK_MIN_SCORE = -0.5
+# 实测：高度相关约 4~6，主题相近但编号不符约 1~2，完全无关常为负数
+RERANK_MIN_SCORE = 2.5
+# 低于此分数且非「实验编号不匹配」→ 走通用 LLM（闲聊/编程等）
+GENERAL_LLM_MAX_SCORE = 1.0
+
+_CN_DIGIT = {
+    "零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
 
 
-def rerank(query: str, docs: list, top_n: int = 3) -> list:
+def _parse_cn_number(token: str):
+    token = token.strip()
+    if not token:
+        return None
+    if token.isdigit():
+        return int(token)
+    if len(token) == 1 and token in _CN_DIGIT:
+        return _CN_DIGIT[token]
+    if token.startswith("十"):
+        rest = token[1:]
+        return 10 if not rest else 10 + _CN_DIGIT.get(rest, 0)
+    if "十" in token:
+        left, _, right = token.partition("十")
+        tens = _CN_DIGIT.get(left, 1) if left else 1
+        ones = _CN_DIGIT.get(right, 0) if right else 0
+        return tens * 10 + ones
+    return None
+
+
+def extract_experiment_ids(text: str) -> set:
+    """从文本中提取实验编号，如 实验四 / 实验5"""
+    ids = set()
+    for match in re.finditer(r"实验\s*([0-9一二三四五六七八九十]+)", text):
+        num = _parse_cn_number(match.group(1))
+        if num is not None:
+            ids.add(num)
+    return ids
+
+
+def experiment_query_mismatch(query: str, docs: list) -> bool:
+    """
+    问题包含具体实验编号，但检索片段中没有相同编号 → 视为知识库无答案。
+    例如问「实验四」，检索到「实验二/实验五」时应拒绝引用。
+    """
+    query_ids = extract_experiment_ids(query)
+    if not query_ids:
+        return False
+
+    for doc in docs:
+        blob = f"{doc.metadata.get('source', '')}\n{doc.page_content}"
+        if query_ids & extract_experiment_ids(blob):
+            return False
+    return True
+
+
+KB_MISS_ANSWER = "抱歉，知识库中未找到与您问题相关的资料，无法根据知识库内容回答该问题。"
+
+CHAT_KEYWORDS = {
+    "你好", "您好", "谢谢", "再见", "你是谁", "介绍一下你",
+}
+
+GENERAL_QUERY_PATTERNS = [
+    r"(?i)python",
+    r"冒泡排序|快速排序|二分查找|排序算法|递归|动态规划",
+    r"写.*(?:代码|程序|脚本)|完成.*(?:代码|程序)|实现.*(?:代码|程序|算法)",
+    r"编程题|算法题|代码题",
+    r"今天天气|讲个笑话|帮我翻译",
+]
+
+
+def is_chitchat_query(query: str) -> bool:
+    return query.strip() in CHAT_KEYWORDS
+
+
+def is_obvious_general_query(query: str) -> bool:
+    """明显与本地知识库无关的通用问题（编程、闲聊等），跳过检索"""
+    q = query.strip()
+    if is_chitchat_query(q):
+        return True
+    if extract_experiment_ids(q):
+        return False
+    return any(re.search(p, q) for p in GENERAL_QUERY_PATTERNS)
+
+
+def _kb_miss_response() -> dict:
+    return {
+        "answer": KB_MISS_ANSWER,
+        "sources": [],
+        "context_length": 0,
+        "retrieved_docs": 0,
+    }
+
+
+def _general_llm_response(query: str) -> dict:
+    print("\n【通用模式】问题与知识库无关，直接调用 LLM（不引用来源）")
+    response = _call_llm_direct(query)
+    return {
+        "answer": response,
+        "sources": [],
+        "context_length": 0,
+        "retrieved_docs": 0,
+    }
+
+
+def rerank(query: str, docs: list, top_n: int = 3) -> tuple:
     """
     使用BGE-Reranker对检索结果重排序，并过滤低相关度文档
     
@@ -137,43 +257,70 @@ def rerank(query: str, docs: list, top_n: int = 3) -> list:
         top_n: 返回前N个
     
     Returns:
-        list: 重排序后的文档列表；全部不相关时返回空列表
+        tuple: (重排序后的文档列表, 最佳 rerank 分数或 None)
     """
     if not docs:
-        return []
+        return [], None
+
+    valid_docs = [
+        doc for doc in docs
+        if getattr(doc, "page_content", None) and str(doc.page_content).strip()
+    ]
+    if not valid_docs:
+        print("Reranker 跳过：检索结果均为空文本")
+        return [], None
 
     reranker = load_reranker()
     if not reranker:
-        return docs[:top_n]
+        return valid_docs[:top_n], None
 
-    pairs = [(query, doc.page_content) for doc in docs]
-    scores = reranker.compute_score(pairs)
+    pairs = [(query, str(doc.page_content).strip()) for doc in valid_docs]
+    try:
+        scores = reranker.compute_score(pairs, batch_size=min(16, len(pairs)))
+    except Exception as e:
+        print(f"Reranker 计算失败，回退为检索顺序: {e}")
+        _reset_reranker()
+        return valid_docs[:top_n], None
+
     if not isinstance(scores, list):
         scores = [scores]
 
-    scored_docs = sorted(zip(docs, scores), key=lambda x: x[1], reverse=True)
+    if len(scores) != len(valid_docs):
+        print("Reranker 分数数量异常，回退为检索顺序")
+        return valid_docs[:top_n], None
+
+    scored_docs = sorted(zip(valid_docs, scores), key=lambda x: x[1], reverse=True)
     best_score = scored_docs[0][1]
     print(f"Reranker 最佳分数: {best_score:.3f} (阈值: {RERANK_MIN_SCORE})")
 
     if best_score < RERANK_MIN_SCORE:
         print("【相关性过滤】判定与知识库无关，不引用任何文档")
-        return []
+        return [], best_score
 
     min_score = max(best_score - 2.0, RERANK_MIN_SCORE)
     filtered = [doc for doc, score in scored_docs if score >= min_score]
-    return filtered[:top_n]
+    filtered = filtered[:top_n]
+
+    if filtered and experiment_query_mismatch(query, filtered):
+        print("【实验编号不匹配】问题与检索内容不一致，判定为知识库无答案")
+        return [], best_score
+
+    return filtered, best_score
 
 
 def _call_llm_direct(query: str) -> str:
     """不基于知识库，直接调用 LLM"""
-    global _reranker
-    _reranker = None
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    model, tokenizer = load_model()
-    response, _ = model.chat(tokenizer, query, history=[])
-    return response
+    _reset_reranker()
+    try:
+        return chat_model(query)
+    except Exception as e:
+        print(f"LLM 调用失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return (
+            "大语言模型暂时不可用（可能因显存不足或模型未加载）。"
+            "请确认后端终端仍在运行，并重启 uvicorn 后重试。"
+        )
 
 # ============================================
 # 主问答函数
@@ -193,48 +340,37 @@ def ask(query: str, use_reranker: bool = True) -> dict:
     global _reranker
     print(f"\n===== 问题: {query} =====")
 
-    chat_keywords = [
-        "你好",
-        "您好",
-        "谢谢",
-        "再见",
-        "你是谁",
-        "介绍一下你"
-    ]
-
-    if query.strip() in chat_keywords:
+    if is_chitchat_query(query):
         print("\n【闲聊模式】直接调用LLM")
-        response = _call_llm_direct(query)
-        return {
-            "answer": response,
-            "sources": [],
-            "context_length": 0,
-            "retrieved_docs": 0
-        }
+        return _general_llm_response(query)
+
+    if is_obvious_general_query(query):
+        print("\n【通用模式】识别为编程/通用问题，跳过知识库检索")
+        return _general_llm_response(query)
     
-    # 1. 检索文档（使用MMR）
+    # 1. 检索文档
     print("\n【步骤1】检索文档...")
     raw_docs = retrieve(query)
     print(f"检索到 {len(raw_docs)} 个文档")
     
     # 2. Reranker重排序
+    rerank_best_score = None
     if use_reranker:
         print("\n【步骤2】Reranker重排序...")
-        docs = rerank(query, raw_docs)
+        docs, rerank_best_score = rerank(query, raw_docs)
         print(f"重排序后保留 {len(docs)} 个文档")
     else:
         docs = raw_docs
     
-    # 3. 无相关文档：通用 LLM 回答，不展示来源
+    # 3. 无相关文档：区分「知识库缺答案」与「通用问题」
     if not docs:
-        print("\n【通用模式】知识库无相关内容，直接调用 LLM（不引用来源）")
-        response = _call_llm_direct(query)
-        return {
-            "answer": response,
-            "sources": [],
-            "context_length": 0,
-            "retrieved_docs": 0
-        }
+        if experiment_query_mismatch(query, raw_docs):
+            print("\n【知识库无匹配】实验编号不匹配，返回标准拒答")
+            return _kb_miss_response()
+        if rerank_best_score is not None and rerank_best_score < GENERAL_LLM_MAX_SCORE:
+            return _general_llm_response(query)
+        print("\n【知识库无匹配】与知识库主题相近但无答案，返回标准拒答")
+        return _kb_miss_response()
     
     # 4. 输出检索结果（调试）
     print("\n【步骤3】检索结果详情：")
